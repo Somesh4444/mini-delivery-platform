@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  DRIVER
+  ADMIN
+}
+
+enum DeliveryStatus {
+  REQUESTED
+  ACCEPTED
+  PICKED_UP
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+model User {
+  id                  Int       @id @default(autoincrement())
+  name                String
+  email               String    @unique
+  password            String
+  phone               String?
+  role                Role      @default(CUSTOMER)
+  resetPasswordToken  String?
+  resetPasswordExpiry DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @default(now()) @updatedAt
+
+  driverProfile Driver?
+  deliveries    Delivery[] @relation("CustomerDeliveries")
+
+  @@map("users")
+}
+
+model Driver {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @unique
+  isOnline   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle    Vehicle?
+  deliveries Delivery[] @relation("DriverDeliveries")
+
+  @@map("drivers")
+}
+
+model Vehicle {
+  id        Int      @id @default(autoincrement())
+  driverId  Int      @unique
+  type      String
+  plateNo   String   @unique
+  model     String?
+  createdAt DateTime @default(now())
+
+  driver    Driver   @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@map("vehicles")
+}
+
+model Delivery {
+  id             Int            @id @default(autoincrement())
+  customerId     Int
+  driverId       Int?
+  
+  pickupAddress  String
+  pickupLat      Float
+  pickupLng      Float
+  dropAddress    String
+  dropLat        Float
+  dropLng        Float
+
+  parcelType     String
+  parcelWeightKg Float
+  instructions   String?
+  distanceKm     Float
+  estimatedPrice Float
+
+  status         DeliveryStatus @default(REQUESTED)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  customer       User           @relation("CustomerDeliveries", fields: [customerId], references: [id])
+  driver         Driver?        @relation("DriverDeliveries", fields: [driverId], references: [id])
+  events         DeliveryEvent[]
+
+  @@map("deliveries")
+}
+
+model DeliveryEvent {
+  id         Int            @id @default(autoincrement())
+  deliveryId Int
+  status     DeliveryStatus
+  createdAt  DateTime       @default(now())
+
+  delivery   Delivery       @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@map("delivery_events")
+}
