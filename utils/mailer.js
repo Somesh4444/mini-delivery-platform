@@ -1,23 +1,27 @@
-const { Resend } = require('resend');
-
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 const sendEmail = async ({ to, subject, html }) => {
-  // Resend free sandbox only allows sending to the account owner (lipu.getrafic@gmail.com).
-  // If sending to any other test email, we route it to your Resend account email
-  // with a header note so it never fails with a 403 validation error.
-  const recipient = 'lipu.getrafic@gmail.com';
-
-  const { data, error } = await resend.emails.send({
-    from: 'SwiftDrop Operations <onboarding@resend.dev>',
-    to: [recipient],
-    subject: `[Target: ${to}] ${subject}`,
-    html
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': process.env.BREVO_API_KEY,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      sender: {
+        name: 'SwiftDrop Fleet Operations',
+        email: process.env.EMAIL_USER || 'lipu.getrafic@gmail.com'
+      },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html
+    })
   });
 
-  if (error) {
-    console.error('Resend delivery error:', error);
-    throw new Error(error.message);
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error('Brevo delivery error:', data);
+    throw new Error(data.message || 'Failed to send email via Brevo');
   }
 
   return data;
