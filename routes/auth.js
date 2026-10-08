@@ -2,22 +2,13 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const prisma = require('../db');
 const { authenticate } = require('../middleware/auth');
+const transporter = require('../utils/mailer');
 
 const router = express.Router();
 
-// Transporter configuration (uses Gmail App Password if defined in .env)
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
-
-// 1. PUBLIC REGISTER (Only CUSTOMER or DRIVER)
+// 1. PUBLIC REGISTER
 router.post('/register', async (req, res) => {
   try {
     const { name, email, password, phone, role } = req.body;
@@ -48,13 +39,7 @@ router.post('/register', async (req, res) => {
         role: assignedRole,
         driverProfile: assignedRole === 'DRIVER' ? { create: { isOnline: false } } : undefined
       },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true
-      }
+      select: { id: true, name: true, email: true, phone: true, role: true }
     });
 
     res.status(201).json({ message: 'User registered successfully', user });
@@ -64,7 +49,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// 2. LOGIN
+// 2. LOGIN (Strict guard for DRIVERS)
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -85,6 +70,16 @@ router.post('/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Lockout: Driver cannot log in until approved by admin
+    if (user.role === 'DRIVER') {
+      const driver = user.driverProfile;
+      if (!driver || driver.status !== 'APPROVED') {
+        return res.status(403).json({
+          error: `Your driver application is currently ${driver?.status || 'PENDING'}. Please wait for admin approval and your email credentials.`
+        });
+      }
     }
 
     const token = jwt.sign(
@@ -142,7 +137,7 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
-// 4. UPDATE OWN PROFILE (Drivers cannot modify phone)
+// 4. UPDATE OWN PROFILE
 router.put('/profile', authenticate, async (req, res) => {
   try {
     const { name, phone } = req.body;
@@ -175,7 +170,7 @@ router.put('/profile', authenticate, async (req, res) => {
   }
 });
 
-// 5. CHANGE PASSWORD (Logged-in user)
+// 5. CHANGE PASSWORD
 router.put('/change-password', authenticate, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -186,10 +181,6 @@ router.put('/change-password', authenticate, async (req, res) => {
 
     if (newPassword.length < 6) {
       return res.status(400).json({ error: 'New password must be at least 6 characters long' });
-    }
-
-    if (currentPassword === newPassword) {
-      return res.status(400).json({ error: 'New password cannot be the same as the current password' });
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.userId } });
@@ -215,7 +206,7 @@ router.put('/change-password', authenticate, async (req, res) => {
   }
 });
 
-// 6. FORGOT PASSWORD (Generate token and send email or print to console)
+// 6. FORGOT PASSWORD
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -229,7 +220,7 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    const resetExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes validity
+    const resetExpiry = new Date(Date.now() + 15 * 60 * 1000);
 
     await prisma.user.update({
       where: { email },
@@ -239,13 +230,13 @@ router.post('/forgot-password', async (req, res) => {
       }
     });
 
-    const resetUrl = `http://localhost:5173/reset-password?token=${resetToken}`;
+    const resetUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/reset-password?token=${resetToken}`;
 
     if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
       await transporter.sendMail({
-        from: `"Mini Delivery" <${process.env.EMAIL_USER}>`,
+        from: `"SwiftDrop Support" <${process.env.EMAIL_USER}>`,
         to: user.email,
-        subject: 'Reset Your Password',
+        subject: 'Reset Your Password — SwiftDrop',
         html: `
           <div style="font-family: sans-serif; padding: 20px;">
             <h2>Password Reset Request</h2>
@@ -255,10 +246,6 @@ router.post('/forgot-password', async (req, res) => {
           </div>
         `
       });
-    } else {
-      console.log('--------------------------------------------------');
-      console.log('RESET LINK (Dev Mode):', resetUrl);
-      console.log('--------------------------------------------------');
     }
 
     res.json({ message: 'If that email exists in our system, a password reset link has been sent.' });
@@ -268,7 +255,7 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-// 7. RESET PASSWORD (Validate token and apply new password)
+// 7. RESET PASSWORD
 router.post('/reset-password', async (req, res) => {
   try {
     const { token, newPassword } = req.body;

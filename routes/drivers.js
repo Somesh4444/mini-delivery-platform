@@ -6,10 +6,7 @@ const { driverDocsUpload } = require('../middleware/upload');
 
 const router = express.Router();
 
-// ============================================================================
-// 1. PUBLIC DRIVER APPLICATION: POST /api/drivers/apply
-// Accepts multipart/form-data with documents & creates PENDING account
-// ============================================================================
+// 1. PUBLIC DRIVER APPLICATION (No password needed from applicant)
 router.post('/apply', (req, res, next) => {
   driverDocsUpload(req, res, (err) => {
     if (err) {
@@ -23,7 +20,6 @@ router.post('/apply', (req, res, next) => {
       name,
       email,
       phone,
-      password,
       drivingLicense,
       aadhaarNumber,
       vehicleType,
@@ -31,9 +27,8 @@ router.post('/apply', (req, res, next) => {
       model
     } = req.body;
 
-    // Field validations
-    if (!name || !email || !phone || !password) {
-      return res.status(400).json({ error: 'Full name, email, phone number, and password are required' });
+    if (!name || !email || !phone) {
+      return res.status(400).json({ error: 'Full name, email, and phone number are required' });
     }
 
     if (!drivingLicense || !aadhaarNumber || !vehicleType || !plateNo) {
@@ -42,13 +37,11 @@ router.post('/apply', (req, res, next) => {
       });
     }
 
-    // Check duplicate email
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(400).json({ error: 'This email is already registered' });
     }
 
-    // Check duplicate driving license or Aadhaar
     const existingDriver = await prisma.driver.findFirst({
       where: {
         OR: [
@@ -62,28 +55,26 @@ router.post('/apply', (req, res, next) => {
       return res.status(400).json({ error: 'This Driving License or Aadhaar Number is already registered' });
     }
 
-    // Check duplicate vehicle plate
     const existingVehicle = await prisma.vehicle.findUnique({ where: { plateNo } });
     if (existingVehicle) {
       return res.status(400).json({ error: 'This vehicle plate number is already registered' });
     }
 
-    // Extract uploaded files if provided
     const driverPhoto = req.files?.driverPhoto ? `/uploads/${req.files.driverPhoto[0].filename}` : null;
     const licensePhoto = req.files?.licensePhoto ? `/uploads/${req.files.licensePhoto[0].filename}` : null;
     const vehiclePhoto = req.files?.vehiclePhoto ? `/uploads/${req.files.vehiclePhoto[0].filename}` : null;
     const rcPhoto = req.files?.rcPhoto ? `/uploads/${req.files.rcPhoto[0].filename}` : null;
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Secure temporary locked password hash
+    const lockedDummyPassword = await bcrypt.hash(`LOCKED_${Date.now()}_${Math.random()}`, 10);
 
-    // Atomic transaction: User -> Driver (PENDING) -> Vehicle
     const application = await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
           name,
           email,
           phone,
-          password: hashedPassword,
+          password: lockedDummyPassword,
           role: 'DRIVER'
         }
       });
@@ -96,7 +87,7 @@ router.post('/apply', (req, res, next) => {
           driverPhoto,
           licensePhoto,
           vehiclePhoto,
-          status: 'PENDING', // Awaiting manual admin verification
+          status: 'PENDING',
           isOnline: false,
           isEmailSent: false
         }
@@ -116,7 +107,7 @@ router.post('/apply', (req, res, next) => {
     });
 
     res.status(201).json({
-      message: 'Application submitted successfully. An administrator will verify your documents before account activation.',
+      message: 'Application submitted successfully. An administrator will review your documents and email your credentials once approved.',
       driverId: application.driver.id
     });
   } catch (error) {
@@ -125,17 +116,13 @@ router.post('/apply', (req, res, next) => {
   }
 });
 
-// ============================================================================
-// 2. GET CURRENT DRIVER PROFILE & STATUS: GET /api/drivers/me
-// ============================================================================
+// 2. GET CURRENT DRIVER PROFILE
 router.get('/me', authenticate, requireRole('DRIVER'), async (req, res) => {
   try {
     const driver = await prisma.driver.findUnique({
       where: { userId: req.user.userId },
       include: {
-        user: {
-          select: { id: true, name: true, email: true, phone: true }
-        },
+        user: { select: { id: true, name: true, email: true, phone: true } },
         vehicle: true
       }
     });
@@ -151,10 +138,7 @@ router.get('/me', authenticate, requireRole('DRIVER'), async (req, res) => {
   }
 });
 
-// ============================================================================
-// 3. TOGGLE DRIVER AVAILABILITY: PATCH /api/drivers/toggle-status
-// Blocked if status is not APPROVED
-// ============================================================================
+// 3. TOGGLE DRIVER AVAILABILITY (Blocked unless APPROVED)
 router.patch('/toggle-status', authenticate, requireRole('DRIVER'), async (req, res) => {
   try {
     const driver = await prisma.driver.findUnique({
@@ -165,7 +149,6 @@ router.patch('/toggle-status', authenticate, requireRole('DRIVER'), async (req, 
       return res.status(404).json({ error: 'Driver profile not found' });
     }
 
-    // Safety check: unapproved drivers cannot go online
     if (driver.status !== 'APPROVED') {
       return res.status(403).json({
         error: `Cannot go online. Your driver account status is currently ${driver.status}. Pending admin verification.`
@@ -187,9 +170,7 @@ router.patch('/toggle-status', authenticate, requireRole('DRIVER'), async (req, 
   }
 });
 
-// ============================================================================
-// 4. REGISTER / UPDATE VEHICLE: POST /api/drivers/vehicle
-// ============================================================================
+// 4. REGISTER / UPDATE VEHICLE
 router.post('/vehicle', authenticate, requireRole('DRIVER'), (req, res, next) => {
   driverDocsUpload(req, res, (err) => {
     if (err) {
