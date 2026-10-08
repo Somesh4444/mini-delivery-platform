@@ -2,11 +2,13 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const prisma = require('../db');
 const { authenticate, requireRole } = require('../middleware/auth');
-const transporter = require('../utils/mailer');
+const { sendEmail } = require('../utils/mailer');
 
 const router = express.Router();
 
-// 1. ADMIN STATS
+// ==========================================
+// 1. ADMIN STATS: GET /api/admin/stats
+// ==========================================
 router.get('/stats', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const totalDeliveries = await prisma.delivery.count();
@@ -43,7 +45,9 @@ router.get('/stats', authenticate, requireRole('ADMIN'), async (req, res) => {
   }
 });
 
-// 2. GET ALL USERS
+// ==========================================
+// 2. GET ALL USERS: GET /api/admin/users
+// ==========================================
 router.get('/users', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const users = await prisma.user.findMany({
@@ -66,7 +70,9 @@ router.get('/users', authenticate, requireRole('ADMIN'), async (req, res) => {
   }
 });
 
-// 3. GET DRIVERS & APPLICATIONS
+// ==========================================
+// 3. GET DRIVERS & APPLICATIONS: GET /api/admin/drivers
+// ==========================================
 router.get('/drivers', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const { status } = req.query;
@@ -87,7 +93,121 @@ router.get('/drivers', authenticate, requireRole('ADMIN'), async (req, res) => {
   }
 });
 
-// 4. APPROVE / REJECT DRIVER STATUS
+// ==========================================
+// 4. ADMIN MANUALLY CREATES A DRIVER: POST /api/admin/drivers/create
+// ==========================================
+router.post('/drivers/create', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      phone,
+      password,
+      drivingLicense,
+      aadhaarNumber,
+      driverPhoto,
+      licensePhoto,
+      vehiclePhoto,
+      vehicleType,
+      plateNo,
+      model,
+      rcPhoto
+    } = req.body;
+
+    if (!name || !email || !phone || !password) {
+      return res.status(400).json({ error: 'Name, email, phone, and password are required' });
+    }
+
+    if (!drivingLicense || !aadhaarNumber || !vehicleType || !plateNo) {
+      return res.status(400).json({
+        error: 'Driving license, Aadhaar number, vehicle type, and plate number are mandatory'
+      });
+    }
+
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    const existingDriver = await prisma.driver.findFirst({
+      where: {
+        OR: [{ drivingLicense }, { aadhaarNumber }]
+      }
+    });
+
+    if (existingDriver) {
+      return res.status(400).json({ error: 'Driving License or Aadhaar Number is already on file' });
+    }
+
+    const existingVehicle = await prisma.vehicle.findUnique({ where: { plateNo } });
+    if (existingVehicle) {
+      return res.status(400).json({ error: 'Vehicle plate number already registered' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newDriverRecord = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          name,
+          email,
+          phone,
+          password: hashedPassword,
+          role: 'DRIVER'
+        }
+      });
+
+      const driver = await tx.driver.create({
+        data: {
+          userId: user.id,
+          drivingLicense,
+          aadhaarNumber,
+          driverPhoto: driverPhoto || null,
+          licensePhoto: licensePhoto || null,
+          vehiclePhoto: vehiclePhoto || null,
+          status: 'APPROVED',
+          isOnline: false,
+          isEmailSent: false,
+          approvedAt: new Date()
+        }
+      });
+
+      const vehicle = await tx.vehicle.create({
+        data: {
+          driverId: driver.id,
+          type: vehicleType,
+          plateNo,
+          model: model || null,
+          rcPhoto: rcPhoto || null
+        }
+      });
+
+      return { user, driver, vehicle };
+    });
+
+    res.status(201).json({
+      message: 'Verified Driver created successfully. You can now click "Send Credentials Email".',
+      driver: {
+        id: newDriverRecord.driver.id,
+        userId: newDriverRecord.user.id,
+        name: newDriverRecord.user.name,
+        email: newDriverRecord.user.email,
+        phone: newDriverRecord.user.phone,
+        drivingLicense: newDriverRecord.driver.drivingLicense,
+        status: newDriverRecord.driver.status,
+        isEmailSent: newDriverRecord.driver.isEmailSent,
+        vehicle: newDriverRecord.vehicle
+      }
+    });
+  } catch (error) {
+    console.error('Admin create driver error:', error);
+    res.status(500).json({ error: 'Failed to register driver' });
+  }
+});
+
+// ==========================================
+// 5. APPROVE / REJECT DRIVER STATUS: PATCH /api/admin/drivers/:id/status
+// ==========================================
 router.patch('/drivers/:id/status', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const driverId = parseInt(req.params.id);
@@ -119,7 +239,9 @@ router.patch('/drivers/:id/status', authenticate, requireRole('ADMIN'), async (r
   }
 });
 
-// 5. MANUAL EMAIL TRIGGER (Applies password, approves driver, sends email)
+// ==========================================
+// 6. MANUAL EMAIL TRIGGER: POST /api/admin/drivers/:id/send-credentials
+// ==========================================
 router.post('/drivers/:id/send-credentials', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const driverId = parseInt(req.params.id);
@@ -137,14 +259,14 @@ router.post('/drivers/:id/send-credentials', authenticate, requireRole('ADMIN'),
       return res.status(404).json({ error: 'Driver not found' });
     }
 
-    // Determine password
+    // Determine password (admin assigned or auto-generated)
     const assignedPassword = temporaryPassword && temporaryPassword.trim().length >= 6
       ? temporaryPassword.trim()
       : `Swift@${Math.floor(1000 + Math.random() * 9000)}`;
 
     const hashedPassword = await bcrypt.hash(assignedPassword, 10);
 
-    // Update password in DB and set status to APPROVED
+    // Update password in DB and mark driver APPROVED
     await prisma.$transaction([
       prisma.user.update({
         where: { id: driver.userId },
@@ -160,9 +282,8 @@ router.post('/drivers/:id/send-credentials', authenticate, requireRole('ADMIN'),
       })
     ]);
 
-    // Send onboarding credentials email
-    const mailOptions = {
-      from: `"SwiftDrop Fleet Operations" <${process.env.EMAIL_USER}>`,
+    // Send onboarding credentials email via HTTP API (Resend)
+    await sendEmail({
       to: driver.user.email,
       subject: '🚀 Welcome to SwiftDrop Fleet — Account Approved & Credentials',
       html: `
@@ -200,9 +321,7 @@ router.post('/drivers/:id/send-credentials', authenticate, requireRole('ADMIN'),
           </p>
         </div>
       `
-    };
-
-    await transporter.sendMail(mailOptions);
+    });
 
     res.json({
       message: `Credentials sent successfully to ${driver.user.email}`,
@@ -215,13 +334,19 @@ router.post('/drivers/:id/send-credentials', authenticate, requireRole('ADMIN'),
   }
 });
 
-// 6. ADMIN CREATES A NEW ADMIN
+// ==========================================
+// 7. ADMIN CREATES A NEW ADMIN: POST /api/admin/create-admin
+// ==========================================
 router.post('/create-admin', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
 
     if (!name || !email || !password || !phone) {
       return res.status(400).json({ error: 'Name, email, phone, and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -243,7 +368,9 @@ router.post('/create-admin', authenticate, requireRole('ADMIN'), async (req, res
   }
 });
 
-// 7. ADMIN UPDATES ANY USER
+// ==========================================
+// 8. ADMIN UPDATES ANY USER: PUT /api/admin/users/:id
+// ==========================================
 router.put('/users/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
@@ -267,7 +394,9 @@ router.put('/users/:id', authenticate, requireRole('ADMIN'), async (req, res) =>
   }
 });
 
-// 8. ADMIN FORCE-RESETS PASSWORD
+// ==========================================
+// 9. ADMIN FORCE-RESETS PASSWORD: POST /api/admin/users/:id/reset-password
+// ==========================================
 router.post('/users/:id/reset-password', authenticate, requireRole('ADMIN'), async (req, res) => {
   try {
     const userId = parseInt(req.params.id);

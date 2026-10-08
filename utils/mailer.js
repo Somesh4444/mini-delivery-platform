@@ -1,16 +1,23 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true, // Use direct SSL (not STARTTLS on 587)
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  },
-  connectionTimeout: 10000, // 10s connection timeout
-  greetingTimeout: 10000,
-  socketTimeout: 15000
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-module.exports = transporter;
+const sendEmail = async ({ to, subject, html }) => {
+  // During testing on the free tier, Resend allows sending from onboarding@resend.dev
+  // to the email address registered with your Resend account.
+  const { data, error } = await resend.emails.send({
+    from: 'Somesh Mini Dlivery System <onboarding@resend.dev>',
+    to: [to],
+    subject,
+    html
+  });
+
+  if (error) {
+    console.error('Resend delivery error:', error);
+    throw new Error(error.message);
+  }
+
+  return data;
+};
+
+module.exports = { sendEmail };
